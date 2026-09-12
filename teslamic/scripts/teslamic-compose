@@ -1,0 +1,137 @@
+#!/bin/bash
+# Compose TeslaMic before SentryUSB mass storage so TeslaMic owns IF0-3.
+set -euo pipefail
+
+CONF=${TESLAMIC_CONFIG:-/etc/teslamic-gadget.conf}
+[ ! -r "$CONF" ] || source "$CONF"
+TESLAMIC_USB_VENDOR=${TESLAMIC_USB_VENDOR:-0x1235}
+TESLAMIC_USB_PRODUCT=${TESLAMIC_USB_PRODUCT:-0x0002}
+TESLAMIC_USB_BCD=${TESLAMIC_USB_BCD:-0x0100}
+TESLAMIC_USB_MANUFACTURER=${TESLAMIC_USB_MANUFACTURER:-TeslaMic_V004_FW_20220217Tes}
+TESLAMIC_USB_PRODUCT_NAME=${TESLAMIC_USB_PRODUCT_NAME:-TeslaMic}
+TESLAMIC_WITH_MASS_STORAGE=${TESLAMIC_WITH_MASS_STORAGE:-1}
+
+G=${TESLAMIC_GADGET_ROOT:-/sys/kernel/config/usb_gadget/sentryusb}
+CFG="$G/configs/c.1"
+TMFUNC="$G/functions/teslamic.usb0"
+MSFUNC="$G/functions/mass_storage.0"
+SERIAL_FILE=${TESLAMIC_SERIAL_FILE:-/etc/teslamic-gadget.serial}
+UDC_CLASS=${TESLAMIC_UDC_CLASS:-/sys/class/udc}
+
+log() { printf 'teslamic-compose: %s\n' "$*" >&2; }
+read_udc() { [ -f "$G/UDC" ] && tr -d '\n' <"$G/UDC" || true; }
+first_udc() {
+    local p
+    for p in "$UDC_CLASS"/*; do
+        [ -e "$p" ] && { basename "$p"; return; }
+    done
+}
+unbind() { [ -f "$G/UDC" ] && printf '\n' >"$G/UDC" 2>/dev/null || true; }
+
+restore_mass_only() {
+    local udc
+    set +e
+    log "restoring mass-storage-only fallback"
+    unbind
+    rm -f "$CFG/teslamic.usb0"
+    rmdir "$TMFUNC" 2>/dev/null || true
+    if [ -d "$MSFUNC" ] && [ -d "$CFG" ]; then
+        rm -f "$CFG/mass_storage.0"
+        ln -s "$MSFUNC" "$CFG/mass_storage.0"
+        printf '0x1d6b' >"$G/idVendor"
+        printf '0x0104' >"$G/idProduct"
+        printf '0x0200' >"$G/bcdUSB"
+        printf '0x0100' >"$G/bcdDevice"
+        if [ -d "$G/strings/0x409" ]; then
+            printf 'SentryUSB' >"$G/strings/0x409/manufacturer"
+            printf 'SentryUSB Composite Gadget' >"$G/strings/0x409/product"
+        fi
+        udc=$(first_udc)
+        [ -z "$udc" ] || printf '%s' "$udc" >"$G/UDC"
+    fi
+}
+
+prepare_disable() {
+    [ -d "$G" ] || return 0
+    unbind
+    rm -f "$CFG/teslamic.usb0"
+    rmdir "$TMFUNC" 2>/dev/null || true
+    # SentryUSB's disable command expects this exact link name.
+    if [ -d "$MSFUNC" ] && [ -d "$CFG" ] && [ ! -L "$CFG/mass_storage.0" ]; then
+        ln -s "$MSFUNC" "$CFG/mass_storage.0"
+    fi
+}
+
+status() {
+    printf 'udc=%s\n' "$(read_udc)"
+    printf 'teslamic_function=%s\n' "$([ -d "$TMFUNC" ] && echo present || echo absent)"
+    printf 'teslamic_link=%s\n' "$([ -L "$CFG/teslamic.usb0" ] && echo present || echo absent)"
+    printf 'mass_storage_link=%s\n' "$([ -L "$CFG/mass_storage.0" ] && echo present || echo absent)"
+    if [ -d "$G" ]; then
+        printf 'vid_pid=%s:%s\n' "$(tr -d '\n' <"$G/idVendor")" "$(tr -d '\n' <"$G/idProduct")"
+    fi
+    for f in "$MSFUNC"/lun.*/file; do
+        [ -f "$f" ] && printf 'lun=%s\n' "$(tr -d '\n' <"$f")"
+    done
+}
+
+case "${1:-}" in
+prepare-disable)
+    prepare_disable
+    ;;
+status)
+    status
+    ;;
+enable)
+    [ -d "$G" ] || { log "SentryUSB gadget does not exist"; exit 1; }
+    [ -d "$CFG" ] || { log "configuration c.1 missing"; exit 1; }
+    if [ "$TESLAMIC_WITH_MASS_STORAGE" = 1 ]; then
+        [ -d "$MSFUNC" ] || { log "mass_storage.0 missing"; exit 1; }
+    fi
+    if [ ! -s "$SERIAL_FILE" ]; then
+        { printf 'TeslaMic:'; tr -d '\n' </etc/machine-id; } | sha512sum | cut -c1-80 | tr '[:lower:]' '[:upper:]' >"$SERIAL_FILE"
+        chmod 0644 "$SERIAL_FILE"
+    fi
+    old_udc=$(read_udc)
+    [ -n "$old_udc" ] || old_udc=$(first_udc)
+    trap restore_mass_only ERR
+    unbind
+    modprobe u_audio
+    modprobe usb_f_teslamic
+
+    # Link order allocates TeslaMic IF0-3, storage IF4.
+    rm -f "$CFG/teslamic.usb0" "$CFG/mass_storage.0"
+    mkdir -p "$TMFUNC"
+    ln -s "$TMFUNC" "$CFG/teslamic.usb0"
+    if [ "$TESLAMIC_WITH_MASS_STORAGE" = 1 ]; then
+        ln -s "$MSFUNC" "$CFG/mass_storage.0"
+    fi
+
+    printf '%s' "$TESLAMIC_USB_VENDOR" >"$G/idVendor"
+    printf '%s' "$TESLAMIC_USB_PRODUCT" >"$G/idProduct"
+    printf '0x0200' >"$G/bcdUSB"
+    printf '%s' "$TESLAMIC_USB_BCD" >"$G/bcdDevice"
+    printf '0x00' >"$G/bDeviceClass"
+    printf '0x00' >"$G/bDeviceSubClass"
+    printf '0x00' >"$G/bDeviceProtocol"
+    printf 'high-speed' >"$G/max_speed"
+    printf '500' >"$CFG/MaxPower"
+    printf '0x80' >"$CFG/bmAttributes"
+    mkdir -p "$G/strings/0x409"
+    printf '%s' "$TESLAMIC_USB_MANUFACTURER" >"$G/strings/0x409/manufacturer"
+    printf '%s' "$TESLAMIC_USB_PRODUCT_NAME" >"$G/strings/0x409/product"
+    tr -d '\n' <"$SERIAL_FILE" >"$G/strings/0x409/serialnumber"
+    # Real/known-good TeslaMic has iConfiguration=0.
+    rmdir "$CFG/strings/0x409" 2>/dev/null || true
+
+    [ -n "$old_udc" ] || { log "no UDC found"; exit 1; }
+    printf '%s' "$old_udc" >"$G/UDC"
+    [ "$(read_udc)" = "$old_udc" ] || { log "UDC bind did not persist"; exit 1; }
+    trap - ERR
+    status
+    ;;
+*)
+    echo "usage: $0 enable|prepare-disable|status" >&2
+    exit 2
+    ;;
+esac

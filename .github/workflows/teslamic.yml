@@ -1,0 +1,42 @@
+name: TeslaMic package
+
+on:
+  push:
+    paths:
+      - "teslamic/**"
+      - "test/teslamic-package.test.py"
+      - ".github/workflows/teslamic.yml"
+  pull_request:
+    paths:
+      - "teslamic/**"
+      - "test/teslamic-package.test.py"
+      - ".github/workflows/teslamic.yml"
+
+jobs:
+  static-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Package contract and rollback tests
+        run: python3 test/teslamic-package.test.py
+      - name: Descriptor tests
+        run: python3 teslamic/kernel/tests/test_descriptors.py
+      - name: Shell syntax and lint
+        run: |
+          bash -n teslamic/install.sh teslamic/uninstall.sh teslamic/verify.sh
+          bash -n teslamic/scripts/teslamic-compose teslamic/scripts/teslamic-bluealsa-bridge teslamic/scripts/teslamic-devices
+          shellcheck teslamic/install.sh teslamic/uninstall.sh teslamic/verify.sh
+          shellcheck teslamic/scripts/teslamic-compose teslamic/scripts/teslamic-bluealsa-bridge teslamic/scripts/teslamic-devices
+      - name: Pairing helper syntax
+        run: python3 -m py_compile teslamic/scripts/teslamic-pair
+
+  kernel-build-note:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain target build requirement
+        run: |
+          echo "The module is built and validated on the target Pi against /lib/modules/$(uname -r)/build."
+          echo "Generic GitHub runner headers are not accepted as proof of Raspberry Pi kernel compatibility."

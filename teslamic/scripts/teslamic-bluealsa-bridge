@@ -1,0 +1,28 @@
+#!/bin/bash
+set -eu
+CONF=${TESLAMIC_CONFIG:-/etc/teslamic-gadget.conf}
+# shellcheck disable=SC1090
+[ ! -r "$CONF" ] || source "$CONF"
+GADGET_ROOT=${TESLAMIC_GADGET_ROOT:-/sys/kernel/config/usb_gadget/sentryusb}
+UDC_CLASS=${TESLAMIC_UDC_CLASS:-/sys/class/udc}
+
+# Do not consume the phone's A2DP stream until a USB host selects this gadget.
+# This prevents continuous BlueALSA overruns while the Pi is unplugged.
+while :; do
+    udc=$(cat "$GADGET_ROOT/UDC" 2>/dev/null || true)
+    if [ -n "$udc" ] && [ -r "$UDC_CLASS/$udc/state" ] &&
+       [ "$(cat "$UDC_CLASS/$udc/state")" = configured ]; then
+        break
+    fi
+    sleep 1
+done
+
+for _ in $(seq 1 60); do
+    card=$(awk '/TeslaMic_Gadget/ { gsub(/[^0-9]/, "", $1); if ($1 != "") { print $1; exit } }' /proc/asound/cards 2>/dev/null || true)
+    if [ -n "$card" ]; then
+        exec /usr/bin/bluealsa-aplay -S -D "plughw:${card},0" --profile-a2dp --single-audio
+    fi
+    sleep 1
+done
+echo 'TeslaMic_Gadget ALSA PCM did not appear' >&2
+exit 1

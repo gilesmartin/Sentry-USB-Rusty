@@ -1,0 +1,16 @@
+[Unit]
+Description=Route paired Bluetooth A2DP audio into TeslaMic USB gadget
+Requires=bluealsa.service
+After=bluealsa.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/bluetoothctl discoverable off
+ExecStartPre=/usr/bin/bluetoothctl pairable off
+ExecStart=/usr/local/sbin/teslamic-bluealsa-bridge
+Restart=always
+RestartSec=2
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

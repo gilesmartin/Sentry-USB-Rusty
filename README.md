@@ -28,6 +28,12 @@
 
 The Rust rewrite of the original Go version. Same `sentryusb.conf`, faster server, more reliable.
 
+> [!NOTE]
+> The `feature/teslamic-bluetooth-bridge` branch includes an optional, source-built
+> [TeslaMic-compatible USB audio and Bluetooth A2DP bridge](teslamic/README.md).
+> It preserves the normal SentryUSB mass-storage LUNs and includes documented
+> install, verification, pairing, second-vehicle deployment, and rollback flows.
+
 Sentry USB is one of the free tools for Tesla owners from the [Sentry Six](https://sentry-six.com) project, alongside [Sentry Studio](https://github.com/Sentry-Six/Sentry-Six) (desktop TeslaCam viewer), [Sentry Drive](https://github.com/Sentry-Six/Sentry-Drive) (drive history and FSD analytics), and [Sentry Connect](https://sentry-six.com/sentry-connect/) (the iPhone companion app for this Pi). Not affiliated with Tesla, Inc. Unrelated to the Sentry (sentry.io) error-monitoring service.
 
 > [!IMPORTANT]

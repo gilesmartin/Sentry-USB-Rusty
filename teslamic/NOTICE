@@ -1,0 +1,13 @@
+SentryUSB TeslaMic integration notices
+
+The parent Sentry-USB-Rusty project is distributed under the PolyForm Noncommercial License 1.0.0. Preserve its LICENSE and Required Notice.
+
+`kernel/usb_f_teslamic.c`, `kernel/u_audio.h`, `kernel/uac_common.h`, and `kernel/Makefile` are marked SPDX-License-Identifier: GPL-2.0+ and must remain GPL-compatible because the module uses Linux kernel gadget-audio interfaces.
+
+TeslaMic descriptor data was reproduced from the MIT-licensed TeslAux project:
+  https://github.com/jbschooley/TeslAux
+Reference revision used during development:
+  36411047439e7a28bece60759a2d6b0bebba9462
+Copyright and license terms remain with their respective authors.
+
+No Tesla firmware, private Bluetooth state, host serial, machine ID, credential, SSH material, or prebuilt kernel module is included.

@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Open a bounded BlueZ pairing window and trust one new A2DP source."""
+import argparse
+import os
+import sys
+
+DEFAULT_TIMEOUT = 180
+AUDIO_UUIDS = {
+    "0000110a-0000-1000-8000-00805f9b34fb",  # Audio Source
+    "0000110c-0000-1000-8000-00805f9b34fb",  # AVRCP target
+    "0000110d-0000-1000-8000-00805f9b34fb",  # A2DP
+    "0000110e-0000-1000-8000-00805f9b34fb",  # AVRCP
+}
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Open a temporary SentryUSB Bluetooth pairing window")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="pairing window in seconds (default: config or 180)")
+    return parser.parse_args()
+
+def read_config_timeout():
+    path = "/etc/teslamic-gadget.conf"
+    try:
+        for raw in open(path, encoding="utf-8"):
+            key, sep, value = raw.strip().partition("=")
+            if sep and key == "TESLAMIC_PAIRING_TIMEOUT":
+                return int(value.strip().strip('"\''))
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_TIMEOUT
+
+def main():
+    args = parse_args()
+    timeout = args.timeout if args.timeout is not None else read_config_timeout()
+    if os.geteuid() != 0:
+        raise SystemExit("teslamic-pair must run as root")
+    if timeout < 30 or timeout > 900:
+        raise SystemExit("timeout must be between 30 and 900 seconds")
+
+    try:
+        import dbus
+        import dbus.service
+        from dbus.mainloop.glib import DBusGMainLoop
+        from gi.repository import GLib
+    except ImportError as exc:
+        raise SystemExit("python3-dbus and python3-gi are required") from exc
+
+    BLUEZ = "org.bluez"
+    AGENT_IFACE = "org.bluez.Agent1"
+    AGENT_MGR = "org.bluez.AgentManager1"
+    PROPS = "org.freedesktop.DBus.Properties"
+    OBJMGR = "org.freedesktop.DBus.ObjectManager"
+    DEVICE = "org.bluez.Device1"
+    ADAPTER = "org.bluez.Adapter1"
+    AGENT_PATH = "/org/sentryusb/teslamic_agent"
+    loop = GLib.MainLoop()
+    paired = {"path": None, "name": None}
+    audio_authorized = set()
+
+    class Rejected(dbus.DBusException):
+        _dbus_error_name = "org.bluez.Error.Rejected"
+
+    class Agent(dbus.service.Object):
+        def _require_new_selected_device(self, device):
+            device = str(device)
+            if (not device.startswith(adapter_device_prefix) or
+                    device in initially_paired):
+                raise Rejected("Device is not a new pairing on the selected adapter")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+        def Release(self):
+            loop.quit()
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
+        def RequestPinCode(self, device):
+            self._require_new_selected_device(device)
+            raise Rejected("Legacy fixed-PIN pairing is not supported")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="ouq", out_signature="")
+        def DisplayPasskey(self, device, passkey, entered):
+            print(f"Passkey for {device}: {int(passkey):06d}", flush=True)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+        def RequestConfirmation(self, device, passkey):
+            self._require_new_selected_device(device)
+            print(f"Confirming {int(passkey):06d} for {device}", flush=True)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
+        def RequestAuthorization(self, device):
+            self._require_new_selected_device(device)
+            print(f"Authorizing pairing from {device}", flush=True)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+        def AuthorizeService(self, device, uuid):
+            self._require_new_selected_device(device)
+            if str(uuid).lower() not in AUDIO_UUIDS:
+                raise Rejected(f"Service {uuid} is not required for TeslaMic audio")
+            print(f"Authorizing audio service {uuid}", flush=True)
+            audio_authorized.add(str(device))
+            trust_if_ready(str(device))
+
+        @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+        def Cancel(self):
+            print("Pairing request cancelled", flush=True)
+
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    manager_obj = bus.get_object(BLUEZ, "/")
+    objects = dbus.Interface(manager_obj, OBJMGR).GetManagedObjects()
+    adapter_path = next((path for path, ifaces in objects.items() if ADAPTER in ifaces), None)
+    if adapter_path is None:
+        raise SystemExit("No Bluetooth adapter found")
+    adapter_device_prefix = f"{adapter_path}/dev_"
+    initially_paired = {
+        str(path) for path, ifaces in objects.items()
+        if str(path).startswith(adapter_device_prefix)
+        and DEVICE in ifaces and bool(ifaces[DEVICE].get("Paired", False))
+    }
+    adapter_props = dbus.Interface(bus.get_object(BLUEZ, adapter_path), PROPS)
+    agent = Agent(bus, AGENT_PATH)
+    agent_mgr = dbus.Interface(bus.get_object(BLUEZ, "/org/bluez"), AGENT_MGR)
+
+    def set_adapter(name, value):
+        adapter_props.Set(ADAPTER, name, value)
+
+    def close_window():
+        for name, value in (("Discoverable", False), ("Pairable", False)):
+            try:
+                set_adapter(name, dbus.Boolean(value))
+            except dbus.DBusException:
+                pass
+
+    def finish():
+        loop.quit()
+        return False
+
+    def trust_if_ready(path):
+        path = str(path)
+        if (paired["path"] or path not in audio_authorized or
+                path in initially_paired or
+                not path.startswith(adapter_device_prefix)):
+            return
+        dev_props = dbus.Interface(bus.get_object(BLUEZ, path), PROPS)
+        all_props = dev_props.GetAll(DEVICE)
+        if not bool(all_props.get("Paired", False)):
+            return
+        dev_props.Set(DEVICE, "Trusted", dbus.Boolean(True))
+        paired["path"] = path
+        paired["name"] = str(all_props.get("Alias", all_props.get("Name", "new device")))
+        print(f"Paired, audio-authorized, and trusted: {paired['name']}", flush=True)
+        GLib.timeout_add_seconds(2, finish)
+
+    def properties_changed(interface, changed, invalidated, path=None):
+        path = str(path or "")
+        if (interface != DEVICE or not path.startswith(adapter_device_prefix) or
+                path in initially_paired or paired["path"] or
+                not bool(changed.get("Paired", False))):
+            return
+        print(f"Bonded device {path}; waiting for an allowed audio service", flush=True)
+        trust_if_ready(path)
+
+    bus.add_signal_receiver(properties_changed,
+                            dbus_interface=PROPS,
+                            signal_name="PropertiesChanged",
+                            path_keyword="path")
+    try:
+        agent_mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+        agent_mgr.RequestDefaultAgent(AGENT_PATH)
+        set_adapter("Powered", dbus.Boolean(True))
+        set_adapter("DiscoverableTimeout", dbus.UInt32(timeout))
+        set_adapter("Pairable", dbus.Boolean(True))
+        set_adapter("Discoverable", dbus.Boolean(True))
+        print(f"Pairing open for {timeout} seconds. Select this SentryUSB device now.", flush=True)
+        GLib.timeout_add_seconds(timeout, finish)
+        loop.run()
+    finally:
+        close_window()
+        try:
+            agent_mgr.UnregisterAgent(AGENT_PATH)
+        except dbus.DBusException:
+            pass
+        agent.remove_from_connection()
+
+    if paired["path"]:
+        print(f"Pairing complete: {paired['name']}")
+        return 0
+    print("Pairing window closed without a new device", file=sys.stderr)
+    return 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+usage() { echo "usage: teslamic-devices list|info|trust|connect|disconnect|remove [device-address]" >&2; }
+valid_address() { [[ ${1:-} =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]; }
+cmd=${1:-list}
+case "$cmd" in
+list)
+    bluetoothctl devices | while read -r _ address name; do
+        details=$(bluetoothctl info "$address" 2>/dev/null || true)
+        grep -q $'\tPaired: yes' <<<"$details" || continue
+        paired=$(grep -m1 $'\tPaired:' <<<"$details" | xargs)
+        trusted=$(grep -m1 $'\tTrusted:' <<<"$details" | xargs)
+        connected=$(grep -m1 $'\tConnected:' <<<"$details" | xargs)
+        printf '%s  %s  %s; %s; %s\n' "$address" "$name" "$paired" "$trusted" "$connected"
+    done
+    ;;
+info|trust|connect|disconnect|remove)
+    address=${2:-}
+    valid_address "$address" || { usage; exit 2; }
+    bluetoothctl "$cmd" "$address"
+    ;;
+*) usage; exit 2 ;;
+esac
