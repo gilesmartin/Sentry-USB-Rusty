@@ -3,7 +3,10 @@
 set -euo pipefail
 
 CONF=${TESLAMIC_CONFIG:-/etc/teslamic-gadget.conf}
-[ ! -r "$CONF" ] || source "$CONF"
+if [ -r "$CONF" ]; then
+    # shellcheck disable=SC1090
+    source "$CONF"
+fi
 TESLAMIC_USB_VENDOR=${TESLAMIC_USB_VENDOR:-0x1235}
 TESLAMIC_USB_PRODUCT=${TESLAMIC_USB_PRODUCT:-0x0002}
 TESLAMIC_USB_BCD=${TESLAMIC_USB_BCD:-0x0100}
@@ -19,14 +22,14 @@ SERIAL_FILE=${TESLAMIC_SERIAL_FILE:-/etc/teslamic-gadget.serial}
 UDC_CLASS=${TESLAMIC_UDC_CLASS:-/sys/class/udc}
 
 log() { printf 'teslamic-compose: %s\n' "$*" >&2; }
-read_udc() { [ -f "$G/UDC" ] && tr -d '\n' <"$G/UDC" || true; }
+read_udc() { if [ -f "$G/UDC" ]; then tr -d '\n' <"$G/UDC"; else true; fi; }
 first_udc() {
     local p
     for p in "$UDC_CLASS"/*; do
         [ -e "$p" ] && { basename "$p"; return; }
     done
 }
-unbind() { [ -f "$G/UDC" ] && printf '\n' >"$G/UDC" 2>/dev/null || true; }
+unbind() { if [ -f "$G/UDC" ]; then printf '\n' >"$G/UDC" 2>/dev/null; else true; fi; }
 
 restore_mass_only() {
     local udc

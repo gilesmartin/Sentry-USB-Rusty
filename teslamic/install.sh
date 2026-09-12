@@ -45,8 +45,14 @@ if [ "$ROOT" = / ]; then
     }
     [ -d /sys/kernel/config/usb_gadget ] || { echo "configfs USB gadget tree is unavailable" >&2; exit 1; }
     compgen -G '/sys/class/udc/*' >/dev/null || { echo "no USB device controller found" >&2; exit 1; }
-    touch /etc/.teslamic-write-test && rm -f /etc/.teslamic-write-test || {
-        echo "root filesystem is not writable; remount it rw before installation" >&2; exit 1; }
+    if ! touch /etc/.teslamic-write-test; then
+        echo "root filesystem is not writable; remount it rw before installation" >&2
+        exit 1
+    fi
+    if ! rm -f /etc/.teslamic-write-test; then
+        echo "could not remove root-filesystem write test" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p "$STATE" "$BACKUP_ROOT"
