@@ -32,7 +32,26 @@ files are deliberately not committed because they are kernel-specific.
    sudo ./teslamic/verify.sh
    ```
 
+   Read-only root remains opt-in. After auditing every service-specific write
+   path on the target appliance, use `sudo ./teslamic/install.sh
+   --read-only-root` to migrate the common Tailscale, Bluetooth, and systemd
+   state to `/mutable`. The uninstaller restores the exact prior root policy.
+
 The installer creates one timestamped backup and manifest under `/var/backups/sentryusb-teslamic/`. It preserves the original SentryUSB gadget wrappers and does not modify disk-image contents.
+
+It also installs `sentryusb-teslamic-guard.service`. On every boot, before
+SentryUSB, its archive loop, and Tailscale start, the guard detects stock
+gadget wrappers recreated by a SentryUSB setup/update, preserves those current
+stock commands, and reinstalls the TeslaMic compositor wrappers. By default it
+also keeps `/` writable and restores `SKIP_READONLY=true`; set
+`TESLAMIC_PRESERVE_WRITABLE_ROOT=0` in `/etc/teslamic-gadget.conf` only when a
+separate persistent-state design makes a read-only root safe. The explicit
+`--read-only-root` mode sets this after creating a reversible backup; it does
+not replace auditing application-specific state such as NetworkManager or PM2.
+
+After using the browser setup page, run `sudo systemctl restart
+sentryusb-teslamic-guard.service` before rebooting if you want the repair to
+take effect in the same boot. The guard runs automatically on the next boot.
 
 ## Pair an audio source
 

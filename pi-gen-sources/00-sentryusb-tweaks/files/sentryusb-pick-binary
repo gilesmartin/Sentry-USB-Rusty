@@ -122,10 +122,12 @@ if [ ! -x "$PICKED_PATH" ]; then
     fi
 fi
 
-# Atomic symlink swap — ln -sfn keeps the old link reachable until rename
-# completes, so a concurrent systemd ExecStart wouldn't dereference a
-# half-written link.
-ln -sfn "$PICKED_PATH" "$CURRENT_LINK"
+# Avoid touching an already-correct link. Besides reducing unnecessary flash
+# writes, this lets the picker run when the installed root is read-only.
+if [ "$(readlink "$CURRENT_LINK" 2>/dev/null || true)" != "$PICKED_PATH" ]; then
+    # Atomic symlink swap — ln -sfn keeps the old link reachable until rename.
+    ln -sfn "$PICKED_PATH" "$CURRENT_LINK"
+fi
 
 # Record what this CPU NEEDS (the detected variant) — NOT what we ended
 # up running. The fallback pick above reflects what happened to be on
@@ -136,7 +138,8 @@ ln -sfn "$PICKED_PATH" "$CURRENT_LINK"
 # it isn't a release suffix and 404s every download built from it.
 # Best-effort write — failure here doesn't block startup, the updater
 # just falls back to re-detection on its own.
-if [ -n "$DETECTED" ]; then
+if [ -n "$DETECTED" ] \
+    && [ "$(cat "$ACTIVE_FILE" 2>/dev/null || true)" != "$DETECTED" ]; then
     printf '%s\n' "$DETECTED" > "$ACTIVE_FILE" 2>/dev/null || true
 fi
 
@@ -160,7 +163,7 @@ log "selected variant=${PICKED} (detected=${DETECTED:-unknown}) path=${PICKED_PA
 # Legacy installs: if no per-variant copies exist under /opt/sentryusb
 # (image predates this scheme and the OTA updater hasn't run since), leave
 # /root/bin alone — a regular file there is the only copy we have.
-mkdir -p /root/bin 2>/dev/null || true
+[ -d /root/bin ] || mkdir -p /root/bin 2>/dev/null || true
 for name in sentryusb-tesla-telemetry sentryusb-ble-action; do
     AUX_PATH="${INSTALL_DIR}/${name}-${PICKED}"
     if [ ! -x "$AUX_PATH" ]; then
@@ -175,7 +178,9 @@ for name in sentryusb-tesla-telemetry sentryusb-ble-action; do
         done
     fi
     if [ -x "$AUX_PATH" ]; then
-        ln -sfn "$AUX_PATH" "/root/bin/${name}"
+        if [ "$(readlink "/root/bin/${name}" 2>/dev/null || true)" != "$AUX_PATH" ]; then
+            ln -sfn "$AUX_PATH" "/root/bin/${name}"
+        fi
         log "${name} -> ${AUX_PATH}"
     fi
 done

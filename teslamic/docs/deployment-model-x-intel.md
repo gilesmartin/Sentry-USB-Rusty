@@ -27,7 +27,10 @@ USB Audio Class 1 is broadly supported, but vehicle firmware, region, and Caraok
    test -d "/lib/modules/$(uname -r)/build"
    ```
 
-5. Ensure root is writable for installation. This package does not restore read-only-root behavior.
+5. Ensure root is writable for installation. Ordinary installation keeps it
+   writable. Use the explicit `--read-only-root` option only after mapping
+   Model X-specific NetworkManager, modem, hotspot, PM2, and SSH state to
+   persistent storage.
 6. Copy or clone the repository onto the Pi. Do not transfer Bluetooth pairing databases, `/etc/machine-id`, generated USB serials, SSH keys, or a module built on the first Pi.
 
 ## Install
@@ -39,6 +42,10 @@ sudo ./teslamic/install.sh
 sudo reboot
 sudo ./teslamic/verify.sh
 ```
+
+For an already-audited appliance, substitute `sudo ./teslamic/install.sh
+--read-only-root`. Do not use that shortcut as proof that modem/hotspot state
+is persistent; reboot-test those services separately.
 
 The installer builds against the second Pi's kernel, generates that host's USB serial on first gadget composition, and preserves its own original SentryUSB wrappers.
 

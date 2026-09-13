@@ -15,7 +15,11 @@ REQUIRED = [
     "kernel/uac_common.h", "kernel/tests/test_descriptors.py",
     "scripts/teslamic-compose", "scripts/teslamic-bluealsa-bridge",
     "scripts/teslamic-pair", "scripts/teslamic-devices",
+    "scripts/teslamic-ensure-integration",
+    "scripts/sentryusb-readonly-root",
     "systemd/teslamic-bluealsa.service",
+    "systemd/sentryusb-teslamic-guard.service",
+    "systemd/sentryusb-archive.service.d/teslamic.conf",
     "systemd/bluealsa.service.d/teslamic.conf",
     "install.sh", "uninstall.sh", "verify.sh",
     "docs/architecture.md", "docs/deployment-model-x-intel.md",
@@ -24,6 +28,35 @@ REQUIRED = [
 ]
 
 class TeslaMicPackageTests(unittest.TestCase):
+    def test_rsync_monitors_tolerate_mobile_tailscale_transitions(self):
+        archive = (ROOT / "run/rsync_archive/archive-clips.sh").read_text()
+        music = (ROOT / "run/rsync_archive/copy-music.sh").read_text()
+
+        normal = archive.split("else", 1)[1]
+        self.assertIn("MONITOR_MISSES=20", normal)
+        self.assertIn("MONITOR_TIMEOUT=20", normal)
+        self.assertIn(
+            "export ARCHIVE_PING_TIMEOUT=4 ARCHIVE_SSH_TIMEOUT=8", normal
+        )
+        self.assertNotIn("--bwlimit", archive)
+        self.assertIn(
+            'MONITOR_SERVER="${ARCHIVE_SERVER:-$RSYNC_SERVER}"', archive
+        )
+        self.assertIn(
+            'archive-is-reachable.sh "$MONITOR_SERVER"', archive
+        )
+        self.assertNotIn(
+            'archive-is-reachable.sh "$ARCHIVE_SERVER"', archive
+        )
+
+        self.assertIn("MONITOR_MISSES=20", music)
+        self.assertIn("MONITOR_TIMEOUT=20", music)
+        self.assertIn(
+            "export ARCHIVE_PING_TIMEOUT=4 ARCHIVE_SSH_TIMEOUT=8", music
+        )
+        self.assertIn('timeout "$MONITOR_TIMEOUT"', music)
+        self.assertNotIn("--bwlimit", music)
+
     def test_required_package_files_exist(self):
         missing = [p for p in REQUIRED if not (TM / p).is_file()]
         self.assertEqual(missing, [])
@@ -96,6 +129,10 @@ class TeslaMicPackageTests(unittest.TestCase):
         self.assertIn("manifest", uninstall)
         self.assertIn("service-states.tsv", install)
         self.assertIn("service-states.tsv", uninstall)
+        self.assertIn("systemctl start sentryusb-teslamic-guard.service", install)
+        archive_dropin = (TM / "systemd/sentryusb-archive.service.d/teslamic.conf").read_text()
+        self.assertIn("Requires=sentryusb-teslamic-guard.service", archive_dropin)
+        self.assertIn("After=sentryusb-teslamic-guard.service", archive_dropin)
         self.assertNotIn("systemctl enable bluealsa-aplay.service", uninstall)
         self.assertNotIn('rm -f "/lib/modules/$KERNEL/extra/usb_f_teslamic.ko"', uninstall)
 
@@ -127,6 +164,110 @@ class TeslaMicPackageTests(unittest.TestCase):
             self.assertEqual(disable.read_bytes(), original_disable)
             self.assertFalse((root / "usr/local/sbin/teslamic-compose").exists())
 
+    def test_readonly_mode_is_explicit_and_fully_reversible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for directory in (
+                "root/bin", "etc/bluetooth", "boot/firmware",
+                "etc/NetworkManager/conf.d", "etc/systemd/system",
+                "usr/local/bin", "var/lib/tailscale", "var/cache/tailscale",
+                "var/lib/bluetooth", "var/lib/systemd", "mutable",
+            ):
+                (root / directory).mkdir(parents=True, exist_ok=True)
+            originals = {
+                "root/bin/enable_gadget.sh": "#!/bin/sh\necho enable\n",
+                "root/bin/disable_gadget.sh": "#!/bin/sh\necho disable\n",
+                "etc/bluetooth/main.conf": "[Policy]\n#AutoEnable=true\n",
+                "etc/fstab": "PARTUUID=test / ext4 defaults,noatime,rw 0 1\n",
+                "boot/firmware/cmdline.txt": "console=tty1 root=PARTUUID=test rootwait rw\n",
+                "root/sentryusb.conf": "export SKIP_READONLY=true\n",
+                "etc/resolv.conf": "nameserver 192.0.2.1\n",
+                "usr/local/bin/sentryusb-pick-binary": "#!/bin/sh\necho old-picker\n",
+                "var/lib/tailscale/tailscaled.state": "test-state\n",
+                "var/lib/systemd/random-seed": "test-seed\n",
+            }
+            for relative, content in originals.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+
+            subprocess.run(
+                [str(TM / "install.sh"), "--read-only-root", "--root", tmp],
+                check=True,
+            )
+            installed_helper = root / "usr/local/sbin/sentryusb-readonly-root"
+            subprocess.run(
+                [str(installed_helper), "enable", "--root", tmp], check=True
+            )
+            picker = (root / "usr/local/bin/sentryusb-pick-binary").read_text()
+            self.assertIn("Avoid touching an already-correct link", picker)
+            self.assertIn("mount -o remount,rw /", installed_helper.read_text())
+            self.assertIn(
+                "mount -o remount,rw /boot/firmware", installed_helper.read_text()
+            )
+            fstab = (root / "etc/fstab").read_text()
+            self.assertEqual(fstab.count("/mutable/.tailscale /var/lib/tailscale"), 1)
+            self.assertRegex(fstab, r"PARTUUID=test\s+/\s+ext4\s+defaults,noatime,ro")
+            self.assertIn("/mutable/.tailscale /var/lib/tailscale", fstab)
+            self.assertIn("/mutable/.tailscale-cache /var/cache/tailscale", fstab)
+            self.assertIn("/mutable/.bluetooth /var/lib/bluetooth", fstab)
+            self.assertIn("/mutable/.systemd /var/lib/systemd", fstab)
+            self.assertIn("TESLAMIC_PRESERVE_WRITABLE_ROOT=0", (root / "etc/teslamic-gadget.conf").read_text())
+            self.assertTrue((root / "etc/resolv.conf").is_symlink())
+            self.assertEqual(
+                (root / "etc/resolv.conf").readlink(),
+                pathlib.Path("../run/systemd/resolve/stub-resolv.conf"),
+            )
+            self.assertTrue((root / "etc/systemd/system/cloud-init-local.service").is_symlink())
+            self.assertTrue((root / "mutable/.tailscale/tailscaled.state").is_file())
+
+            subprocess.run([str(TM / "uninstall.sh"), "--root", tmp], check=True)
+            for relative, content in originals.items():
+                self.assertEqual((root / relative).read_text(), content, relative)
+            self.assertFalse((root / "etc/systemd/system/cloud-init-local.service").exists())
+            self.assertFalse((root / "etc/systemd/system/tailscaled.service.d/20-readonly-state.conf").exists())
+
+    def test_readonly_enable_failure_rolls_back_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for relative in ("etc", "root"):
+                (root / relative).mkdir(parents=True, exist_ok=True)
+            (root / "etc/fstab").write_text(
+                "PARTUUID=test / ext4 defaults,noatime,rw 0 1\n"
+            )
+            (root / "root/sentryusb.conf").write_text(
+                "export SKIP_READONLY=true\n"
+            )
+            (root / "etc/teslamic-gadget.conf").write_text(
+                "TESLAMIC_PRESERVE_WRITABLE_ROOT=1\n"
+            )
+            cmdline = root / "boot/firmware/cmdline.txt"
+            cmdline.parent.mkdir(parents=True)
+            cmdline.write_bytes(b"console=tty1 rw \xff\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                subprocess.run(
+                    [
+                        str(TM / "scripts/sentryusb-readonly-root"),
+                        "enable",
+                        "--root",
+                        tmp,
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            self.assertEqual(
+                (root / "etc/fstab").read_text(),
+                "PARTUUID=test / ext4 defaults,noatime,rw 0 1\n",
+            )
+            self.assertEqual(
+                (root / "root/sentryusb.conf").read_text(),
+                "export SKIP_READONLY=true\n",
+            )
+            self.assertFalse(
+                (root / "var/lib/sentryusb-teslamic/readonly-backup/manifest.tsv").exists()
+            )
+
     def test_install_migrates_existing_ad_hoc_teslamic_wrapper_without_recursion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -141,6 +282,65 @@ class TeslaMicPackageTests(unittest.TestCase):
             preserved = (root / "usr/local/libexec/sentryusb-teslamic/original-enable-gadget.sh").read_text()
             self.assertIn("sentryusb gadget enable", preserved)
             self.assertNotIn("teslamic-compose", preserved)
+
+    def test_guard_repairs_setup_overwrite_and_preserves_writable_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "root/bin").mkdir(parents=True)
+            (root / "etc/bluetooth").mkdir(parents=True)
+            (root / "boot/firmware").mkdir(parents=True)
+            (root / "root/bin/enable_gadget.sh").write_text(
+                '#!/bin/bash -eu\nsentryusb gadget enable "$@"\n'
+            )
+            (root / "root/bin/disable_gadget.sh").write_text(
+                '#!/bin/bash -eu\nsentryusb gadget disable "$@"\n'
+            )
+            (root / "etc/bluetooth/main.conf").write_text("[Policy]\nAutoEnable=true\n")
+            (root / "etc/fstab").write_text(
+                "PARTUUID=test / ext4 defaults,noatime,rw 0 1\n"
+            )
+            (root / "boot/firmware/cmdline.txt").write_text(
+                "console=tty1 root=PARTUUID=test rootwait rw\n"
+            )
+            (root / "root/sentryusb.conf").write_text(
+                "export ARCHIVE_SYSTEM=none\nexport SKIP_READONLY=true\n"
+            )
+
+            subprocess.run([str(TM / "install.sh"), "--root", tmp], check=True)
+
+            # Reproduce what a full browser setup did on the live Pi.
+            (root / "root/bin/enable_gadget.sh").write_text(
+                '#!/bin/bash -eu\nsentryusb gadget enable --new-stock "$@"\n'
+            )
+            (root / "root/bin/disable_gadget.sh").write_text(
+                '#!/bin/bash -eu\nsentryusb gadget disable --new-stock "$@"\n'
+            )
+            (root / "etc/fstab").write_text(
+                "PARTUUID=test / ext4 defaults,noatime,ro 0 1\n"
+            )
+            (root / "boot/firmware/cmdline.txt").write_text(
+                "console=tty1 root=PARTUUID=test rootwait ro\n"
+            )
+            (root / "root/sentryusb.conf").write_text("export ARCHIVE_SYSTEM=rsync\n")
+
+            subprocess.run(
+                [str(TM / "scripts/teslamic-ensure-integration"), "--root", tmp],
+                check=True,
+            )
+
+            self.assertIn("teslamic-compose enable", (root / "root/bin/enable_gadget.sh").read_text())
+            self.assertIn("Managed by sentryusb-teslamic", (root / "root/bin/enable_gadget.sh").read_text())
+            self.assertIn("teslamic-compose prepare-disable", (root / "root/bin/disable_gadget.sh").read_text())
+            self.assertIn(
+                "enable --new-stock",
+                (root / "usr/local/libexec/sentryusb-teslamic/original-enable-gadget.sh").read_text(),
+            )
+            self.assertIn("export SKIP_READONLY=true", (root / "root/sentryusb.conf").read_text())
+            self.assertIn("defaults,noatime,rw", (root / "etc/fstab").read_text())
+            self.assertNotIn("defaults,noatime,ro", (root / "etc/fstab").read_text())
+            cmdline = (root / "boot/firmware/cmdline.txt").read_text().split()
+            self.assertIn("rw", cmdline)
+            self.assertNotIn("ro", cmdline)
 
     def test_public_tree_contains_no_deployment_identifiers_or_secrets(self):
         forbidden = [

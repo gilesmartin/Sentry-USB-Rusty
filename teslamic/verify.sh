@@ -34,6 +34,19 @@ fi
 check_active bluetooth.service
 check_active bluealsa.service
 check_active teslamic-bluealsa.service
+check_active sentryusb-teslamic-guard.service
+if grep -q 'sentryusb-teslamic/original-enable-gadget.sh' /root/bin/enable_gadget.sh 2>/dev/null \
+    && grep -q 'sentryusb-teslamic/original-disable-gadget.sh' /root/bin/disable_gadget.sh 2>/dev/null; then
+    ok "TeslaMic gadget wrappers installed"
+else
+    bad "TeslaMic gadget wrappers were replaced"
+fi
+if grep -qx 'export SKIP_READONLY=true' /root/sentryusb.conf 2>/dev/null \
+    && findmnt -no OPTIONS / | tr ',' '\n' | grep -qx rw; then
+    ok "writable-root safeguard active"
+else
+    bad "writable-root safeguard missing"
+fi
 if systemctl is-enabled --quiet bluealsa-aplay.service; then
     bad "generic bluealsa-aplay must be disabled"
 else

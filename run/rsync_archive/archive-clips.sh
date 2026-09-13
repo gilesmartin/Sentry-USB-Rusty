@@ -1,7 +1,7 @@
 #!/bin/bash -eu
 
-# Connection monitor: poll the archive server every ~10s. Five
-# consecutive misses kill rsync (and this script) so archiveloop can
+# Connection monitor: poll the archive server periodically. A sustained run
+# of consecutive misses kills rsync (and this script) so archiveloop can
 # reach `connect_usb_drives_to_host` and put the gadget back online
 # instead of hanging on a dropped SSH socket while the user drives away.
 # rsync's `--timeout=600` only fires on socket-idle, not on a quietly-
@@ -10,17 +10,21 @@
 #
 # Travel Mode (passed fresh by archiveloop as TRAVEL_MODE_ACTIVE) relaxes the
 # thresholds below for slow, high-latency VPN links so a still-progressing
-# transfer isn't killed by a brief mobile-link hiccup. Normal mode keeps the
-# original snappy values byte-for-byte so "drive away from home" recovery is
-# unchanged.
+# transfer isn't killed by a brief mobile-link hiccup. Normal mode now uses
+# the same patient probes because Tailscale endpoint/DERP transitions occur
+# even when Travel Mode is not enabled.
 if [ "${TRAVEL_MODE_ACTIVE:-0}" = "1" ]; then
   MONITOR_MISSES=20            # ~minutes of sustained loss before giving up
   MONITOR_TIMEOUT=20           # must exceed the patient probe (ping 4 + ssh 8 ~= 12s)
   export ARCHIVE_PING_TIMEOUT=4 ARCHIVE_SSH_TIMEOUT=8
   RSYNC_EXTRA=(--partial)      # resume an interrupted large clip next cycle
 else
-  MONITOR_MISSES=5             # unchanged
-  MONITOR_TIMEOUT=6            # unchanged
+  # Tailscale/mobile paths can remain usable while fresh ICMP/SSH probes
+  # time out during endpoint/DERP transitions. Use the same patient probe
+  # budget in normal mode, but keep rsync uncapped for full speed.
+  MONITOR_MISSES=20
+  MONITOR_TIMEOUT=20
+  export ARCHIVE_PING_TIMEOUT=4 ARCHIVE_SSH_TIMEOUT=8
   # --partial in normal mode too: with the archive reads now running at low
   # I/O priority behind the car's writes, rsync's own --timeout=600 can
   # abort a slowed-but-wanted transfer; without --partial the in-flight
@@ -38,12 +42,17 @@ if [ -n "${RSYNC_SSH_PORT:-}" ]; then
   RSYNC_SSH_ARGS=(-e "ssh -p ${RSYNC_SSH_PORT}")
 fi
 
+# configure.sh exports ARCHIVE_SERVER during initial setup, but normal boot
+# only reloads sentryusb.conf. Derive the monitor target from the canonical
+# rsync setting so nounset mode cannot silently kill the watchdog.
+MONITOR_SERVER="${ARCHIVE_SERVER:-$RSYNC_SERVER}"
+
 function connectionmonitor {
   while true
   do
     for (( i = 1; i <= MONITOR_MISSES; i++ ))
     do
-      if timeout "$MONITOR_TIMEOUT" /root/bin/archive-is-reachable.sh "$ARCHIVE_SERVER"
+      if timeout "$MONITOR_TIMEOUT" /root/bin/archive-is-reachable.sh "$MONITOR_SERVER"
       then
         sleep 5
         continue 2

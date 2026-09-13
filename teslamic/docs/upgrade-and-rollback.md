@@ -15,7 +15,12 @@ Bluetooth, BlueALSA, the generic player, the TeslaMic bridge, and SentryUSB's
 archive service were enabled before installation. Rollback restores those
 enablement states instead of guessing defaults.
 
-Backed-up integration includes the SentryUSB enable/disable wrappers, TeslaMic scripts and units, BlueALSA override, module-load configuration, Bluetooth configuration, and local TeslaMic configuration/serial if present.
+Backed-up integration includes the SentryUSB enable/disable wrappers, TeslaMic scripts and units, BlueALSA override, module-load configuration, Bluetooth configuration, root mount policy, resolver link, SentryUSB configuration, binary picker, and local TeslaMic configuration/serial if present.
+
+The optional `--read-only-root` mode also maintains a nested manifest under
+`/var/lib/sentryusb-teslamic/readonly-backup/`. Uninstall restores that policy
+first, then applies the outer pre-install manifest so original files are
+restored byte-for-byte.
 
 ## SentryUSB OTA updates
 
@@ -41,3 +46,22 @@ sudo reboot
 The uninstaller disables the bridge, prepares the gadget for SentryUSB teardown, restores each path according to the manifest, removes the current-kernel module, runs `depmod`, and requests a reboot. It does not delete Bluetooth pairings or disk images.
 
 After reboot, confirm ordinary SentryUSB mass storage works before deleting the backup directory.
+## SentryUSB browser setup and OTA updates
+
+Full setup and some update paths can replace `/root/bin/enable_gadget.sh` and
+`disable_gadget.sh` with stock mass-storage-only shims. The browser config
+writer can also deactivate `SKIP_READONLY` because that setting is not exposed
+in its submitted form. `sentryusb-teslamic-guard.service` repairs both conditions
+at boot while preserving any newer stock shim implementation as the delegated
+base command.
+
+After setup/update and before reboot, the repair can be applied immediately:
+
+```bash
+sudo systemctl restart sentryusb-teslamic-guard.service
+sudo ./teslamic/verify.sh
+```
+
+Do not infer successful TeslaMic restoration from a loaded kernel module alone.
+Verification must show the `teslamic.usb0` function and config link, the
+`TeslaMic_Gadget` ALSA PCM, the mass-storage link, and every expected LUN.

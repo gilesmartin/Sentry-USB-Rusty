@@ -24,7 +24,12 @@ service_states="$backup/service-states.tsv"
 [ -s "$manifest" ] || { echo "manifest missing: $manifest" >&2; exit 1; }
 if [ "$DRY_RUN" = 1 ]; then echo "Would restore files from $manifest and disable TeslaMic services."; exit 0; fi
 [ "$ROOT" != / ] || [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+readonly_helper=$(rpath /usr/local/sbin/sentryusb-readonly-root)
+if [ -x "$readonly_helper" ]; then
+    "$readonly_helper" restore --root "$ROOT"
+fi
 if [ "$ROOT" = / ]; then
+    systemctl disable --now sentryusb-teslamic-guard.service 2>/dev/null || true
     systemctl disable --now teslamic-bluealsa.service 2>/dev/null || true
     /usr/local/sbin/teslamic-compose prepare-disable 2>/dev/null || true
 fi

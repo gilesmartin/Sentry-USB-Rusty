@@ -1,0 +1,257 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT=/
+ACTION=enable
+usage() { echo "usage: $0 [enable|restore] [--root DIR]"; }
+while [ $# -gt 0 ]; do
+    case "$1" in
+        enable|restore) ACTION=$1 ;;
+        --root) shift; ROOT=${1:?--root requires a directory} ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    shift
+done
+ROOT=${ROOT%/}; [ -n "$ROOT" ] || ROOT=/
+case "$ROOT" in /*) ;; *) echo "--root directory must be absolute" >&2; exit 2 ;; esac
+rpath() { [ "$ROOT" = / ] && printf '%s' "$1" || printf '%s%s' "$ROOT" "$1"; }
+
+[ "$ROOT" != / ] || [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+STATE=$(rpath /var/lib/sentryusb-teslamic/readonly-backup)
+MANIFEST="$STATE/manifest.tsv"
+FILES="$STATE/files"
+MUTABLE=$(rpath /mutable)
+
+managed_paths=(
+    /etc/fstab
+    /boot/firmware/cmdline.txt
+    /root/sentryusb.conf
+    /etc/resolv.conf
+    /etc/teslamic-gadget.conf
+    /etc/systemd/system/cloud-init-local.service
+    /etc/systemd/system/cloud-init-network.service
+    /etc/systemd/system/cloud-config.service
+    /etc/systemd/system/cloud-final.service
+    /etc/systemd/system/cloud-init-main.service
+    /etc/systemd/system/tailscaled.service.d/20-readonly-state.conf
+)
+
+restore_files() {
+    [ -s "$MANIFEST" ] || return 0
+    while IFS=$'\t' read -r state path; do
+        actual=$(rpath "$path")
+        rel=${path#/}
+        rm -rf "$actual"
+        if [ "$state" = present ]; then
+            mkdir -p "$(dirname "$actual")"
+            cp -a "$FILES/$rel" "$actual"
+        fi
+    done <"$MANIFEST"
+    rm -f "$MANIFEST"
+}
+
+restore_resolved_service() {
+    [ "$ROOT" = / ] || return 0
+    resolved_state="$STATE/systemd-resolved.state"
+    [ -s "$resolved_state" ] || return 0
+    read -r resolved_enabled resolved_active <"$resolved_state"
+    case "$resolved_enabled" in
+        enabled|enabled-runtime|linked|linked-runtime) systemctl enable systemd-resolved.service ;;
+        masked|masked-runtime) systemctl mask systemd-resolved.service ;;
+        *) systemctl disable systemd-resolved.service ;;
+    esac
+    if [ "$resolved_active" = active ]; then
+        systemctl start systemd-resolved.service
+    else
+        systemctl stop systemd-resolved.service
+    fi
+    rm -f "$resolved_state"
+}
+
+if [ "$ACTION" = restore ]; then
+    boot_was_ro=0
+    if [ "$ROOT" = / ]; then
+        mount -o remount,rw /
+        if mountpoint -q /boot/firmware \
+            && findmnt -no OPTIONS /boot/firmware | tr ',' '\n' | grep -Fxq ro; then
+            mount -o remount,rw /boot/firmware
+            boot_was_ro=1
+        fi
+        # Called indirectly by the EXIT trap below.
+        # shellcheck disable=SC2317
+        restore_boot_mode() {
+            [ "$boot_was_ro" = 0 ] || mount -o remount,ro /boot/firmware || true
+        }
+        trap restore_boot_mode EXIT
+    fi
+    restore_files
+    if [ "$ROOT" = / ]; then
+        systemctl daemon-reload
+        restore_resolved_service
+    fi
+    exit 0
+fi
+
+[ -f "$(rpath /etc/fstab)" ] || { echo "missing /etc/fstab" >&2; exit 1; }
+[ -f "$(rpath /boot/firmware/cmdline.txt)" ] || { echo "missing kernel cmdline" >&2; exit 1; }
+[ -f "$(rpath /root/sentryusb.conf)" ] || { echo "missing SentryUSB configuration" >&2; exit 1; }
+if [ "$ROOT" = / ] && ! systemctl cat systemd-resolved.service >/dev/null 2>&1; then
+    echo "systemd-resolved is required for read-only resolver state" >&2
+    exit 1
+fi
+
+if [ ! -s "$MANIFEST" ]; then
+    mkdir -p "$FILES"
+    manifest_new="$MANIFEST.new"
+    rm -f "$manifest_new"
+    : >"$manifest_new"
+    for path in "${managed_paths[@]}"; do
+        actual=$(rpath "$path")
+        rel=${path#/}
+        if [ -e "$actual" ] || [ -L "$actual" ]; then
+            mkdir -p "$FILES/$(dirname "$rel")"
+            cp -a "$actual" "$FILES/$rel"
+            printf 'present\t%s\n' "$path" >>"$manifest_new"
+        else
+            printf 'missing\t%s\n' "$path" >>"$manifest_new"
+        fi
+    done
+    mv "$manifest_new" "$MANIFEST"
+fi
+
+if [ "$ROOT" = / ] && [ ! -s "$STATE/systemd-resolved.state" ]; then
+    printf '%s %s\n' \
+        "$(systemctl is-enabled systemd-resolved.service 2>/dev/null || true)" \
+        "$(systemctl is-active systemd-resolved.service 2>/dev/null || true)" \
+        >"$STATE/systemd-resolved.state"
+fi
+
+enable_complete=0
+enable_boot_was_ro=0
+if [ "$ROOT" = / ] && mountpoint -q /boot/firmware \
+    && findmnt -no OPTIONS /boot/firmware | tr ',' '\n' | grep -Fxq ro; then
+    mount -o remount,rw /boot/firmware
+    enable_boot_was_ro=1
+fi
+# Called indirectly by the EXIT trap below.
+# shellcheck disable=SC2317
+enable_exit() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ] && [ "$enable_complete" = 0 ]; then
+        restore_files
+        if [ "$ROOT" = / ]; then
+            systemctl daemon-reload || true
+            restore_resolved_service || true
+        fi
+    fi
+    [ "$enable_boot_was_ro" = 0 ] || mount -o remount,ro /boot/firmware || true
+    exit "$status"
+}
+trap enable_exit EXIT
+
+copy_state() {
+    local source=$1 destination=$2 mode=${3:-0700}
+    local actual_source actual_destination
+    actual_source=$(rpath "$source")
+    actual_destination="$MUTABLE/$destination"
+    mkdir -p "$actual_source"
+    install -d -m "$mode" "$actual_destination"
+    cp -a "$actual_source"/. "$actual_destination"/
+}
+
+copy_state /var/lib/tailscale .tailscale
+copy_state /var/cache/tailscale .tailscale-cache
+copy_state /var/lib/bluetooth .bluetooth
+copy_state /var/lib/systemd .systemd 0755
+
+python3 - "$(rpath /etc/fstab)" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text().splitlines()
+managed_targets = {
+    "/var/lib/tailscale", "/var/cache/tailscale",
+    "/var/lib/bluetooth", "/var/lib/systemd",
+}
+out = []
+rfkill = []
+for line in lines:
+    if line in {
+        "# TeslaMic managed writable state for read-only root.",
+        "# Runtime rfkill state overlays the persistent systemd state.",
+    }:
+        continue
+    fields = line.split()
+    if fields and not fields[0].startswith("#") and len(fields) >= 4:
+        if fields[1] == "/":
+            options = [x for x in fields[3].split(",") if x not in {"rw", "ro"}]
+            options.append("ro")
+            fields[3] = ",".join(options)
+            line = " ".join(fields)
+        if fields[1] in managed_targets:
+            continue
+        if fields[1] == "/var/lib/systemd/rfkill":
+            rfkill.append(line)
+            continue
+    out.append(line)
+
+out += [
+    "", "# TeslaMic managed writable state for read-only root.",
+    "/mutable/.tailscale /var/lib/tailscale none bind,nofail,x-systemd.requires-mounts-for=/mutable,x-systemd.before=tailscaled.service 0 0",
+    "/mutable/.tailscale-cache /var/cache/tailscale none bind,nofail,x-systemd.requires-mounts-for=/mutable,x-systemd.before=tailscaled.service 0 0",
+    "/mutable/.bluetooth /var/lib/bluetooth none bind,nofail,x-systemd.requires-mounts-for=/mutable,x-systemd.before=bluetooth.service 0 0",
+    "/mutable/.systemd /var/lib/systemd none bind,nofail,x-systemd.requires-mounts-for=/mutable,x-systemd.before=systemd-random-seed.service 0 0",
+]
+if rfkill:
+    out += ["", "# Runtime rfkill state overlays the persistent systemd state."] + rfkill
+path.write_text("\n".join(out) + "\n")
+PY
+
+python3 - "$(rpath /boot/firmware/cmdline.txt)" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = re.sub(r"(?<!\S)rw(?!\S)", "ro", text)
+if not re.search(r"(?<!\S)ro(?!\S)", text):
+    text = text.rstrip("\n") + " ro\n"
+path.write_text(text)
+PY
+
+set_config() {
+    local path=$1 key=$2 value=$3
+    if grep -qE "^(export[[:space:]]+)?${key}=" "$path"; then
+        sed -i -E "s|^(export[[:space:]]+)?${key}=.*|export ${key}=${value}|" "$path"
+    else
+        printf '\nexport %s=%s\n' "$key" "$value" >>"$path"
+    fi
+}
+set_config "$(rpath /root/sentryusb.conf)" SKIP_READONLY false
+set_config "$(rpath /etc/teslamic-gadget.conf)" TESLAMIC_PRESERVE_WRITABLE_ROOT 0
+
+resolv=$(rpath /etc/resolv.conf)
+mkdir -p "$(dirname "$resolv")"
+rm -rf "$resolv"
+ln -s ../run/systemd/resolve/stub-resolv.conf "$resolv"
+
+for service in cloud-init-local cloud-init-network cloud-config cloud-final cloud-init-main; do
+    target=$(rpath "/etc/systemd/system/${service}.service")
+    mkdir -p "$(dirname "$target")"
+    rm -rf "$target"
+    ln -s /dev/null "$target"
+done
+
+dropin=$(rpath /etc/systemd/system/tailscaled.service.d/20-readonly-state.conf)
+mkdir -p "$(dirname "$dropin")"
+cat >"$dropin" <<'EOF'
+[Unit]
+RequiresMountsFor=/var/lib/tailscale /var/cache/tailscale
+EOF
+
+if [ "$ROOT" = / ]; then
+    systemctl daemon-reload
+    systemctl enable --now systemd-resolved.service
+fi
+enable_complete=1

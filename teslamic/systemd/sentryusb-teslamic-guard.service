@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore SentryUSB TeslaMic integration after setup or update
+After=local-fs.target
+Before=sentryusb.service sentryusb-archive.service tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/sentryusb-teslamic/teslamic-ensure-integration
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

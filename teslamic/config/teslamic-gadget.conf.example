@@ -6,3 +6,7 @@ TESLAMIC_USB_MANUFACTURER=TeslaMic_V004_FW_20220217Tes
 TESLAMIC_USB_PRODUCT_NAME=TeslaMic
 TESLAMIC_WITH_MASS_STORAGE=1
 TESLAMIC_PAIRING_TIMEOUT=180
+# SentryUSB's browser setup may otherwise convert / to read-only and replace
+# the TeslaMic gadget wrappers. Set to 0 only if another persistent-state
+# design keeps Bluetooth/Tailscale data writable and wrapper hooks intact.
+TESLAMIC_PRESERVE_WRITABLE_ROOT=1

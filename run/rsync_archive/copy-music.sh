@@ -10,6 +10,14 @@ if [ -n "${RSYNC_SSH_PORT:-}" ]; then
   RSYNC_SSH_ARGS=(-e "ssh -p ${RSYNC_SSH_PORT}")
 fi
 
+# Match camera archiving's patient reachability policy. A mobile Tailscale
+# path can remain usable while endpoint discovery or DERP briefly prevents
+# fresh ICMP/SSH probes; do not kill a progressing music transfer after only
+# a few one-second failures.
+MONITOR_MISSES=20
+MONITOR_TIMEOUT=20
+export ARCHIVE_PING_TIMEOUT=4 ARCHIVE_SSH_TIMEOUT=8
+
 # check that DST is the mounted disk image, not the mountpoint directory
 if ! findmnt --mountpoint $DST > /dev/null
 then
@@ -20,9 +28,9 @@ fi
 function connectionmonitor {
   while true
   do
-    for _ in {1..10}
+    for (( i = 1; i <= MONITOR_MISSES; i++ ))
     do
-      if timeout 3 /root/bin/archive-is-reachable.sh "$ARCHIVE_SERVER"
+      if timeout "$MONITOR_TIMEOUT" /root/bin/archive-is-reachable.sh "$ARCHIVE_SERVER"
       then
         # sleep and then continue outer loop
         sleep 5

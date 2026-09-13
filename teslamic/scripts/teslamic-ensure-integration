@@ -1,0 +1,155 @@
+#!/bin/bash
+# Restore TeslaMic integration after SentryUSB setup/update rewrites its wrappers.
+set -euo pipefail
+ROOT=/
+usage() { echo "usage: $0 [--root DIR]"; }
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) shift; ROOT=${1:?--root requires a directory} ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    shift
+done
+ROOT=${ROOT%/}; [ -n "$ROOT" ] || ROOT=/
+case "$ROOT" in /*) ;; *) echo "--root directory must be absolute" >&2; exit 2 ;; esac
+rpath() { [ "$ROOT" = / ] && printf '%s' "$1" || printf '%s%s' "$ROOT" "$1"; }
+
+CONF=$(rpath /etc/teslamic-gadget.conf)
+TESLAMIC_PRESERVE_WRITABLE_ROOT=1
+if [ -r "$CONF" ]; then
+    # shellcheck disable=SC1090
+    source "$CONF"
+fi
+
+if [ "$ROOT" = / ]; then
+    [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+fi
+
+LIBEXEC=$(rpath /usr/local/libexec/sentryusb-teslamic)
+ENABLE=$(rpath /root/bin/enable_gadget.sh)
+DISABLE=$(rpath /root/bin/disable_gadget.sh)
+ORIGINAL_ENABLE="$LIBEXEC/original-enable-gadget.sh"
+ORIGINAL_DISABLE="$LIBEXEC/original-disable-gadget.sh"
+MARKER='# Managed by sentryusb-teslamic'
+
+needs_wrapper_repair=0
+[ -f "$ORIGINAL_ENABLE" ] || needs_wrapper_repair=1
+[ -f "$ORIGINAL_DISABLE" ] || needs_wrapper_repair=1
+[ -f "$ENABLE" ] && grep -Fxq "$MARKER" "$ENABLE" || needs_wrapper_repair=1
+[ -f "$DISABLE" ] && grep -Fxq "$MARKER" "$DISABLE" || needs_wrapper_repair=1
+
+root_was_ro=0
+boot_was_ro=0
+restore_mount_modes() {
+    if [ "$ROOT" = / ] && [ "$TESLAMIC_PRESERVE_WRITABLE_ROOT" != 1 ]; then
+        [ "$boot_was_ro" = 0 ] || mount -o remount,ro /boot/firmware || true
+        [ "$root_was_ro" = 0 ] || mount -o remount,ro / || true
+    fi
+}
+trap restore_mount_modes EXIT
+
+if [ "$ROOT" = / ]; then
+    if findmnt -no OPTIONS / | tr ',' '\n' | grep -Fxq ro; then
+        root_was_ro=1
+    fi
+    if mountpoint -q /boot/firmware \
+        && findmnt -no OPTIONS /boot/firmware | tr ',' '\n' | grep -Fxq ro; then
+        boot_was_ro=1
+    fi
+    if [ "$TESLAMIC_PRESERVE_WRITABLE_ROOT" = 1 ] || [ "$needs_wrapper_repair" = 1 ]; then
+        mount -o remount,rw /
+    fi
+    if [ "$TESLAMIC_PRESERVE_WRITABLE_ROOT" = 1 ] && mountpoint -q /boot/firmware; then
+        mount -o remount,rw /boot/firmware
+    fi
+fi
+
+if [ "$needs_wrapper_repair" = 1 ]; then
+    install -d -m 0755 "$LIBEXEC" "$(dirname "$ENABLE")"
+
+    # A SentryUSB setup/update may install newer stock shims. Capture those
+    # before replacing them, but never preserve our wrapper and recurse.
+    if [ -f "$ENABLE" ] && ! grep -q 'teslamic-compose' "$ENABLE"; then
+        install -m 0755 "$ENABLE" "$ORIGINAL_ENABLE"
+    fi
+    if [ -f "$DISABLE" ] && ! grep -q 'teslamic-compose' "$DISABLE"; then
+        install -m 0755 "$DISABLE" "$ORIGINAL_DISABLE"
+    fi
+
+    if [ ! -f "$ORIGINAL_ENABLE" ]; then
+        printf '%s\n' '#!/bin/bash -eu' 'sentryusb gadget enable "$@"' >"$ORIGINAL_ENABLE"
+    fi
+    if [ ! -f "$ORIGINAL_DISABLE" ]; then
+        printf '%s\n' '#!/bin/bash -eu' 'sentryusb gadget disable "$@"' >"$ORIGINAL_DISABLE"
+    fi
+    chmod 0755 "$ORIGINAL_ENABLE" "$ORIGINAL_DISABLE"
+
+    printf '%s\n' \
+        '#!/bin/bash -eu' \
+        "$MARKER" \
+        '/usr/local/libexec/sentryusb-teslamic/original-enable-gadget.sh "$@"' \
+        '/usr/local/sbin/teslamic-compose enable' >"$ENABLE"
+    printf '%s\n' \
+        '#!/bin/bash -eu' \
+        "$MARKER" \
+        '/usr/local/sbin/teslamic-compose prepare-disable' \
+        'exec /usr/local/libexec/sentryusb-teslamic/original-disable-gadget.sh "$@"' >"$DISABLE"
+    chmod 0755 "$ENABLE" "$DISABLE"
+fi
+
+if [ "$TESLAMIC_PRESERVE_WRITABLE_ROOT" = 1 ]; then
+    python3 - "$(rpath /root/sentryusb.conf)" "$(rpath /etc/fstab)" "$(rpath /boot/firmware/cmdline.txt)" <<'PY'
+from pathlib import Path
+import os
+import re
+import sys
+import tempfile
+
+conf, fstab, cmdline = map(Path, sys.argv[1:])
+
+def atomic_write(path: Path, text: str) -> None:
+    if not path.exists():
+        return
+    stat = path.stat()
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, stat.st_mode)
+        os.chown(temporary, stat.st_uid, stat.st_gid)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+if conf.exists():
+    lines = [
+        line for line in conf.read_text().splitlines()
+        if not re.match(r"^\s*export\s+SKIP_READONLY\s*=", line)
+    ]
+    lines += ["", "# Preserve writable root for TeslaMic/Tailscale integration.", "export SKIP_READONLY=true"]
+    atomic_write(conf, "\n".join(lines) + "\n")
+
+if fstab.exists():
+    output = []
+    for line in fstab.read_text().splitlines():
+        fields = line.split()
+        if line.strip() and not line.lstrip().startswith("#") and len(fields) >= 4 and fields[1] == "/":
+            options = [item for item in fields[3].split(",") if item not in ("ro", "rw")]
+            options.append("rw")
+            fields[3] = ",".join(options)
+            line = "\t".join(fields)
+        output.append(line)
+    atomic_write(fstab, "\n".join(output) + "\n")
+
+if cmdline.exists():
+    tokens = [token for token in cmdline.read_text().split() if token not in ("ro", "rw")]
+    tokens.append("rw")
+    atomic_write(cmdline, " ".join(tokens) + "\n")
+PY
+fi
+
+printf 'TeslaMic integration verified\n'

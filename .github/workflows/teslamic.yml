@@ -4,11 +4,15 @@ on:
   push:
     paths:
       - "teslamic/**"
+      - "run/rsync_archive/**"
+      - "pi-gen-sources/00-sentryusb-tweaks/files/sentryusb-pick-binary"
       - "test/teslamic-package.test.py"
       - ".github/workflows/teslamic.yml"
   pull_request:
     paths:
       - "teslamic/**"
+      - "run/rsync_archive/**"
+      - "pi-gen-sources/00-sentryusb-tweaks/files/sentryusb-pick-binary"
       - "test/teslamic-package.test.py"
       - ".github/workflows/teslamic.yml"
 
@@ -26,9 +30,11 @@ jobs:
       - name: Shell syntax and lint
         run: |
           bash -n teslamic/install.sh teslamic/uninstall.sh teslamic/verify.sh
-          bash -n teslamic/scripts/teslamic-compose teslamic/scripts/teslamic-bluealsa-bridge teslamic/scripts/teslamic-devices
+          bash -n teslamic/scripts/teslamic-compose teslamic/scripts/teslamic-bluealsa-bridge teslamic/scripts/teslamic-devices teslamic/scripts/teslamic-ensure-integration teslamic/scripts/sentryusb-readonly-root
+          bash -n run/rsync_archive/archive-clips.sh run/rsync_archive/copy-music.sh run/rsync_archive/archive-is-reachable.sh pi-gen-sources/00-sentryusb-tweaks/files/sentryusb-pick-binary
           shellcheck teslamic/install.sh teslamic/uninstall.sh teslamic/verify.sh
-          shellcheck teslamic/scripts/teslamic-compose teslamic/scripts/teslamic-bluealsa-bridge teslamic/scripts/teslamic-devices
+          shellcheck teslamic/scripts/teslamic-compose teslamic/scripts/teslamic-bluealsa-bridge teslamic/scripts/teslamic-devices teslamic/scripts/teslamic-ensure-integration teslamic/scripts/sentryusb-readonly-root
+          shellcheck run/rsync_archive/archive-clips.sh run/rsync_archive/copy-music.sh run/rsync_archive/archive-is-reachable.sh pi-gen-sources/00-sentryusb-tweaks/files/sentryusb-pick-binary
       - name: Pairing helper syntax
         run: python3 -m py_compile teslamic/scripts/teslamic-pair
 
