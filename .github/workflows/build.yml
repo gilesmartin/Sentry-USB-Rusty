@@ -1,5 +1,6 @@
 name: Build & Release
 
+# Registered for manual ARM appliance builds.
 on:
   push:
     tags: ['v*']
