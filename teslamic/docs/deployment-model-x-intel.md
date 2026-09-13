@@ -29,7 +29,7 @@ USB Audio Class 1 is broadly supported, but vehicle firmware, region, and Caraok
 
 5. Ensure root is writable for installation. Ordinary installation keeps it
    writable. Use the explicit `--read-only-root` option only after mapping
-   Model X-specific NetworkManager, modem, hotspot, PM2, and SSH state to
+   Model X-specific NetworkManager, modem, hotspot, and SSH state to
    persistent storage.
 6. Copy or clone the repository onto the Pi. Do not transfer Bluetooth pairing databases, `/etc/machine-id`, generated USB serials, SSH keys, or a module built on the first Pi.
 
