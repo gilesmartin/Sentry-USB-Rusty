@@ -172,8 +172,6 @@ pub async fn save_setup_config(
     State(_s): State<AppState>,
     Json(body): Json<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let _ = sentryusb_shell::run("mount", &["/", "-o", "remount,rw"]).await;
-
     // Archive reachability probes consume ARCHIVE_SERVER; derive it for rsync
     // without overwriting an explicit value.
     let body = mirror_archive_server(body);

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::Command;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -11,6 +12,12 @@ pub type SetupConfig = HashMap<String, String>;
 
 /// Standard location for the setup variables file.
 pub const DEFAULT_CONFIG_PATH: &str = "/root/sentryusb.conf";
+
+/// Writable backing file used by read-only-root installations.  The legacy
+/// shell services still consume [`DEFAULT_CONFIG_PATH`] through a file bind,
+/// while Rust code writes this path so its atomic rename does not target a
+/// mountpoint (`rename(2)` would fail with `EBUSY`).
+pub const MUTABLE_CONFIG_PATH: &str = "/mutable/.readonly-state/config/sentryusb.conf";
 
 /// Location on the boot partition.
 pub const BOOT_CONFIG_PATH: &str = "/boot/firmware/sentryusb.conf";
@@ -35,7 +42,7 @@ pub fn find_config_path() -> &'static str {
     if let Some(p) = ov {
         return p;
     }
-    for p in [DEFAULT_CONFIG_PATH, BOOT_CONFIG_PATH, LEGACY_BOOT_PATH] {
+    for p in [MUTABLE_CONFIG_PATH, DEFAULT_CONFIG_PATH, BOOT_CONFIG_PATH, LEGACY_BOOT_PATH] {
         if Path::new(p).exists() {
             return p;
         }
@@ -198,7 +205,48 @@ pub fn write_file(path: &str, new_config: &SetupConfig) -> Result<()> {
         return Err(e).with_context(|| format!("failed to rename config tmp into place: {}", path));
     }
 
+    refresh_legacy_config_bind(path)?;
+
     Ok(())
+}
+
+/// Refresh the legacy `/root/sentryusb.conf` file bind after atomically
+/// replacing its mutable source. A bind mount pins the old inode, so without
+/// this step shell services would keep reading stale configuration until the
+/// next reboot even though Rust readers saw the new file.
+#[cfg(target_os = "linux")]
+fn refresh_legacy_config_bind(path: &str) -> Result<()> {
+    if path != MUTABLE_CONFIG_PATH {
+        return Ok(());
+    }
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    if !mountinfo_has_mountpoint(&mountinfo, DEFAULT_CONFIG_PATH) {
+        return Ok(());
+    }
+
+    let unmounted = Command::new("umount").arg(DEFAULT_CONFIG_PATH).status()
+        .context("failed to run umount for legacy config bind")?;
+    if !unmounted.success() {
+        anyhow::bail!("failed to unmount legacy config bind");
+    }
+    let mounted = Command::new("mount")
+        .args(["--bind", MUTABLE_CONFIG_PATH, DEFAULT_CONFIG_PATH])
+        .status()
+        .context("failed to run mount for legacy config bind")?;
+    if !mounted.success() {
+        anyhow::bail!("failed to refresh legacy config bind");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn refresh_legacy_config_bind(_path: &str) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_has_mountpoint(mountinfo: &str, target: &str) -> bool {
+    mountinfo.lines().any(|line| line.split_whitespace().nth(4) == Some(target))
 }
 
 /// Tries to parse a line as `export KEY=VALUE`.
@@ -293,6 +341,18 @@ pub fn get_config_value(active: &SetupConfig, commented: &SetupConfig, key: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_detects_exact_config_mountpoint() {
+        let data = concat!(
+            "31 23 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n",
+            "48 31 8:2 /.readonly-state/config/sentryusb.conf ",
+            "/root/sentryusb.conf rw,relatime - ext4 /dev/sdb1 rw\n",
+        );
+        assert!(mountinfo_has_mountpoint(data, DEFAULT_CONFIG_PATH));
+        assert!(!mountinfo_has_mountpoint(data, "/root/sentryusb.conf.tmp"));
+    }
 
     #[test]
     fn test_unquote_single_quotes() {
